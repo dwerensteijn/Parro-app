@@ -1,9 +1,10 @@
 import base64
-from datetime import date, datetime, time
+from datetime import date, datetime
+import io
 import json
-import os
 import urllib.parse
-from openai import OpenAI
+import google.generativeai as genai
+from PIL import Image
 import streamlit as st
 
 # ------------------------------------------------------------------------------
@@ -16,17 +17,8 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 700;
-        color: #1E293B;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        font-size: 1.1rem;
-        color: #64748B;
-        margin-bottom: 2rem;
-    }
+    .main-header { font-size: 2.2rem; font-weight: 700; color: #1E293B; margin-bottom: 0.5rem; }
+    .sub-header { font-size: 1.1rem; color: #64748B; margin-bottom: 2rem; }
     .gcal-btn {
         display: inline-block;
         background-color: #4285F4;
@@ -38,20 +30,19 @@ st.markdown(
         margin-top: 6px;
         margin-bottom: 6px;
     }
-    .gcal-btn:hover {
-        background-color: #3367D6;
-    }
+    .gcal-btn:hover { background-color: #3367D6; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 st.markdown(
-    '<div class="main-header">📅 Parro Kalender Sync</div>',
+    '<div class="main-header">📅 Parro Kalender Sync (Gemini AI)</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-header">Zet screenshots van de Parro-schoolkalender om naar Google Calendar-afspraken en .ics-bestanden.</div>',
+    '<div class="sub-header">Zet screenshots van de Parro-schoolkalender om'
+    " naar Google Calendar-afspraken en .ics-bestanden via Google Gemini.</div>",
     unsafe_allow_html=True,
 )
 
@@ -61,57 +52,58 @@ st.markdown(
 with st.sidebar:
   st.header("⚙️ Instellingen")
 
-  # API Key afhandeling (via Streamlit Secrets of handmatige invoer)
   default_key = (
-      st.secrets.get("OPENAI_API_KEY", "") if hasattr(st, "secrets") else ""
+      st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
   )
   api_key = st.text_input(
-      "OpenAI API Key",
+      "Gemini API Key",
       value=default_key,
       type="password",
-      help="Voer je OpenAI API-sleutel in.",
+      help="Voer je Google Gemini API-sleutel in.",
   )
 
   selected_model = st.selectbox(
       "AI Model",
-      ["gpt-4o", "gpt-4o-mini"],
+      ["gemini-1.5-flash", "gemini-1.5-pro"],
       index=0,
-      help="gpt-4o is het meest nauwkeurig voor het uitlezen van screenshots.",
+      help=(
+          "gemini-1.5-flash is zeer snel, nauwkeurig en valt binnen de gratis"
+          " limieten."
+      ),
   )
 
   st.markdown("---")
   st.markdown("### 💡 Hoe het werkt")
   st.markdown("""
-    1. Upload een screenshot van de **Parro** kalender/agenda.
-    2. De Vision AI herkent automatisch titels, datums en tijden.
-    3. Controleer of bewerk de voorgestelde afspraken.
-    4. Voeg ze toe aan **Google Calendar** of download het **.ics**-bestand.
+    1. Upload een screenshot van de **Parro** kalender.
+    2. Google Gemini verwerkt de afbeelding.
+    3. Controleer de voorgestelde afspraken.
+    4. Voeg met 1 klik toe aan **Google Calendar** of download het **.ics**-bestand.
     """)
 
 
 # ------------------------------------------------------------------------------
-# HULPFUNCTIES
+# GEMINI VISION ANALYSIS
 # ------------------------------------------------------------------------------
-def encode_image(image_bytes):
-  return base64.b64encode(image_bytes).decode("utf-8")
+def parse_parro_screenshot(
+    image_bytes, api_key, model_name="gemini-1.5-flash"
+):
+  genai.configure(api_key=api_key)
 
-
-def parse_parro_screenshot(image_bytes, api_key, model_name="gpt-4o"):
-  client = OpenAI(api_key=api_key)
-  base64_image = encode_image(image_bytes)
+  img = Image.open(io.BytesIO(image_bytes))
   current_year = datetime.now().year
 
-  system_prompt = f"""
-    Je bent een assistent die screenshots van de school-app Parro analyseert.
-    Extraheer alle unieke kalenderafspraken/agenda-items uit het screenshot.
-    
-    Context:
-    - Het huidige jaar is {current_year}. Als een datum geen jaartal bevat, neem aan dat het {current_year} is (of {current_year + 1} als de maand al voorbij is).
+  prompt = f"""
+    Analyseer dit screenshot van de school-app Parro.
+    Extraheer alle unieke kalenderafspraken en agenda-items uit de afbeelding.
+
+    Regels voor extractie:
+    - Het huidige jaar is {current_year}. Als een datum geen jaartal bevat, neem aan dat het {current_year} is.
     - Zorg voor een correct ISO-datumformaat: YYYY-MM-DD.
-    - Zorg voor een correct 24-uurs tijdformaat: HH:MM. Als er geen specifieke tijd staat, gebruik dan "08:30" als begintijd en "15:00" als eindtijd.
-    - Maak de titels helder en kort (bijv. "Schoolreisje Groep 3 & 4", "Studiedag - Leerlingen vrij", "Luizencontrole").
-    
-    Geef je antwoord UITSLUITEND in geldig JSON met dit exacte schema:
+    - Zorg voor een correct 24-uurs tijdformaat: HH:MM. Als er geen specifieke tijd bij staat, gebruik "08:30" als start en "15:00" als eindtijd.
+    - Maak de titels helder en bondig (bijv. "Schoolreisje Groep 3 & 4", "Studiedag - Alle leerlingen vrij").
+
+    Geef je antwoord UITSLUITEND terug in dit exacte JSON-schema:
     {{
       "events": [
         {{
@@ -119,41 +111,19 @@ def parse_parro_screenshot(image_bytes, api_key, model_name="gpt-4o"):
           "date": "YYYY-MM-DD",
           "start_time": "HH:MM",
           "end_time": "HH:MM",
-          "description": "Eventuele aanvullende details, locaties of opmerkingen"
+          "description": "Eventuele aanvullende details, locatie of opmerkingen"
         }}
       ]
     }}
     """
 
-  response = client.chat.completions.create(
-      model=model_name,
-      messages=[
-          {
-              "role": "system",
-              "content": (
-                  "Je bent een JSON-only extractor van kalendergegevens uit"
-                  " afbeeldingen."
-              ),
-          },
-          {
-              "role": "user",
-              "content": [
-                  {"type": "text", "text": system_prompt},
-                  {
-                      "type": "image_url",
-                      "image_url": {
-                          "url": f"data:image/jpeg;base64,{base64_image}"
-                      },
-                  },
-              ],
-          },
-      ],
-      response_format={"type": "json_object"},
-      temperature=0.1,
+  model = genai.GenerativeModel(model_name)
+  response = model.generate_content(
+      [img, prompt],
+      generation_config={"response_mime_type": "application/json"},
   )
 
-  raw_json = response.choices[0].message.content
-  data = json.loads(raw_json)
+  data = json.loads(response.text)
   return data.get("events", [])
 
 
@@ -249,12 +219,12 @@ with col_upload:
     )
 
 with col_preview:
-  st.subheader("2. AI Herkenning")
+  st.subheader("2. AI Herkenning (Gemini)")
 
   if uploaded_file:
     if not api_key:
       st.warning(
-          "⚠️ Voer eerst je OpenAI API Key in de sidebar in om de afbeelding te"
+          "⚠️ Voer eerst je Gemini API Key in de sidebar in om de afbeelding te"
           " analyseren."
       )
     else:
@@ -262,7 +232,7 @@ with col_preview:
           "extracted_events" not in st.session_state
           or st.session_state.get("last_uploaded") != uploaded_file.name
       ):
-        with st.spinner("🔍 Screenshot wordt geanalyseerd door AI..."):
+        with st.spinner("🔍 Screenshot wordt geanalyseerd door Gemini..."):
           try:
             events = parse_parro_screenshot(
                 uploaded_file.getvalue(), api_key, selected_model
@@ -351,9 +321,6 @@ if "extracted_events" in st.session_state and st.session_state["extracted_events
         unsafe_allow_html=True,
     )
 
-  # ------------------------------------------------------------------------------
-  # EXPORT OPTIES
-  # ------------------------------------------------------------------------------
   st.markdown("### 4. Exporteren")
 
   if not selected_events:
@@ -381,10 +348,7 @@ if "extracted_events" in st.session_state and st.session_state["extracted_events
 
     with col_ics:
       st.markdown("#### 📥 Alles in 1x exporteren (.ics)")
-      st.caption(
-          "Download een `.ics` bestand voor import in Apple Calendar, Outlook of"
-          " Google Calendar:"
-      )
+      st.caption("Download een `.ics` bestand voor je agenda:")
 
       ics_data = generate_ics_content(selected_events)
       st.download_button(
