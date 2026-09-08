@@ -64,9 +64,12 @@ with st.sidebar:
 
   selected_model = st.selectbox(
       "AI Model",
-      ["gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-pro"],
+      ["gemini-3.6-flash", "gemini-1.5-flash", "gemini-2.5-flash"],
       index=0,
-      help="gemini-2.0-flash is het nieuwste, snelste en gratis te gebruiken model.",
+      help=(
+          "gemini-3.6-flash is het aanbevolen, actuele model voor snelle en"
+          " nauwkeurige beeldanalyse."
+      ),
   )
 
   st.markdown("---")
@@ -83,7 +86,7 @@ with st.sidebar:
 # GEMINI VISION ANALYSIS
 # ------------------------------------------------------------------------------
 def parse_parro_screenshot(
-    image_bytes, api_key, model_name="gemini-2.0-flash"
+    image_bytes, api_key, model_name="gemini-3.6-flash"
 ):
   genai.configure(api_key=api_key)
 
